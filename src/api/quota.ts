@@ -128,20 +128,52 @@ function decodeJwtPayload(token: string): any {
 }
 
 /**
- * Resolve Codex chatgpt_account_id from auth file JWT id_token
+ * Extract chatgpt_account_id from an id_token value (JWT string or decoded object)
  */
-async function resolveCodexAccountId(fileName: string): Promise<string | null> {
-  const parsed = await downloadAuthFileJson(fileName)
-  if (!parsed || typeof parsed !== 'object') return null
+function extractAccountIdFromIdToken(idToken: any): string | null {
+  if (!idToken) return null
 
-  const idToken = parsed.id_token ?? parsed.idToken
-  if (typeof idToken !== 'string') return null
+  // Already decoded object
+  if (typeof idToken === 'object') {
+    const accountId = idToken.chatgpt_account_id ?? idToken.chatgptAccountId
+    return typeof accountId === 'string' && accountId.trim() ? accountId.trim() : null
+  }
 
-  const payload = decodeJwtPayload(idToken)
-  if (!payload) return null
+  // JWT string
+  if (typeof idToken === 'string') {
+    const payload = decodeJwtPayload(idToken)
+    if (!payload) return null
+    const accountId = payload.chatgpt_account_id ?? payload.chatgptAccountId
+    return typeof accountId === 'string' && accountId.trim() ? accountId.trim() : null
+  }
 
-  const accountId = payload.chatgpt_account_id ?? payload.chatgptAccountId
-  return typeof accountId === 'string' ? accountId : null
+  return null
+}
+
+/**
+ * Resolve Codex chatgpt_account_id (multi-source: file listing → raw auth file)
+ */
+async function resolveCodexAccountId(file: any): Promise<string | null> {
+  // 1. Try from file listing object (id_token may already be decoded)
+  const candidates = [
+    file.id_token ?? file.idToken,
+    file.metadata?.id_token ?? file.metadata?.idToken,
+    file.attributes?.id_token ?? file.attributes?.idToken
+  ]
+  for (const candidate of candidates) {
+    const id = extractAccountIdFromIdToken(candidate)
+    if (id) return id
+  }
+
+  // 2. Fallback: download raw auth file
+  const parsed = await downloadAuthFileJson(file.name)
+  if (parsed && typeof parsed === 'object') {
+    const rawIdToken = parsed.id_token ?? parsed.idToken
+    const id = extractAccountIdFromIdToken(rawIdToken)
+    if (id) return id
+  }
+
+  return null
 }
 
 /**
@@ -448,7 +480,7 @@ export const codexQuota = {
       'User-Agent': 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal'
     }
 
-    const accountId = await resolveCodexAccountId(file.name)
+    const accountId = await resolveCodexAccountId(file)
     if (!accountId) {
       throw new Error('Missing chatgpt_account_id in id_token')
     }
