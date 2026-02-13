@@ -598,8 +598,8 @@ export const codexQuota = {
     addWindow(rateWindows.weekly, 'Weekly', rateLimit)
 
     const crWindows = classifyWindows(codeReviewLimit)
-    addWindow(crWindows.fiveHour, 'CR 5h', codeReviewLimit)
-    addWindow(crWindows.weekly, 'CR Weekly', codeReviewLimit)
+    addWindow(crWindows.fiveHour, 'Review 5h', codeReviewLimit)
+    addWindow(crWindows.weekly, 'Review Weekly', codeReviewLimit)
 
     return { planType, limits }
   }
