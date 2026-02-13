@@ -1,8 +1,8 @@
 # CPABM 批量认证文件管理前端
 
 基于 Vue 3 的管理控制台，用于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的认证文件、AI 提供商、OAuth 登录、日志与使用统计。
-本项目为简易过渡项目，由于CPA后端接口缺少批量操作接口过渡用，CPAMN功能较为完善，需要完整功能还是使用CPAMN。
 
+本项目为简易过渡项目，由于CPA后端接口缺少批量操作接口过渡用，CPAMc功能较为完善，需要完整功能还是使用CPAMc。
 
 ## 功能亮点
 

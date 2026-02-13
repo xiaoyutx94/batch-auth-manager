@@ -145,6 +145,45 @@ async function resolveCodexAccountId(fileName: string): Promise<string | null> {
 }
 
 /**
+ * Resolve Codex plan_type from auth file (multi-source fallback)
+ */
+function resolveCodexPlanTypeFromFile(file: any): string | null {
+  // 1. file top-level
+  const topLevel = file.plan_type ?? file.planType
+  if (typeof topLevel === 'string' && topLevel.trim()) return topLevel.trim().toLowerCase()
+
+  // 2. file.id_token object
+  const idToken = file.id_token ?? file.idToken
+  if (idToken && typeof idToken === 'object') {
+    const pt = idToken.plan_type ?? idToken.planType
+    if (typeof pt === 'string' && pt.trim()) return pt.trim().toLowerCase()
+  }
+
+  // 3. file.metadata
+  const metadata = file.metadata
+  if (metadata && typeof metadata === 'object') {
+    const pt = metadata.plan_type ?? metadata.planType
+    if (typeof pt === 'string' && pt.trim()) return pt.trim().toLowerCase()
+
+    // metadata.id_token
+    const metaIdToken = metadata.id_token ?? metadata.idToken
+    if (metaIdToken && typeof metaIdToken === 'object') {
+      const pt2 = metaIdToken.plan_type ?? metaIdToken.planType
+      if (typeof pt2 === 'string' && pt2.trim()) return pt2.trim().toLowerCase()
+    }
+  }
+
+  // 4. file.attributes
+  const attributes = file.attributes
+  if (attributes && typeof attributes === 'object') {
+    const pt = attributes.plan_type ?? attributes.planType
+    if (typeof pt === 'string' && pt.trim()) return pt.trim().toLowerCase()
+  }
+
+  return null
+}
+
+/**
  * Antigravity Quota
  */
 export const antigravityQuota = {
@@ -410,9 +449,12 @@ export const codexQuota = {
     }
 
     const accountId = await resolveCodexAccountId(file.name)
-    if (accountId) {
-      header['Chatgpt-Account-Id'] = accountId
+    if (!accountId) {
+      throw new Error('Missing chatgpt_account_id in id_token')
     }
+    header['Chatgpt-Account-Id'] = accountId
+
+    const planTypeFromFile = resolveCodexPlanTypeFromFile(file)
 
     const result = await apiCallApi.request({
       authIndex,
@@ -425,72 +467,107 @@ export const codexQuota = {
       throw new Error(result.bodyText || `HTTP ${result.statusCode}`)
     }
 
-    return this.parse(result.body)
+    return this.parse(result.body, planTypeFromFile)
   },
 
-  parse(data: any): any {
+  parse(data: any, planTypeFromFile?: string | null): any {
+    const FIVE_HOUR_SECONDS = 18000
+    const WEEK_SECONDS = 604800
+
     const limits: any[] = []
-    let planType = 'unknown'
+    const planTypeFromApi = data.plan_type || data.planType || null
+    const planType = (planTypeFromApi ? String(planTypeFromApi).trim().toLowerCase() : null)
+      ?? planTypeFromFile
+      ?? 'unknown'
 
     const rateLimit = data.rate_limit || data.rateLimit
     const codeReviewLimit = data.code_review_rate_limit || data.codeReviewRateLimit
 
-    planType = data.plan_type || data.planType || 'unknown'
-
-    const parseWindows = (limitInfo: any, prefix = '') => {
-      if (!limitInfo) return
-
-      const primaryWindow = limitInfo.primary_window || limitInfo.primaryWindow
-      const secondaryWindow = limitInfo.secondary_window || limitInfo.secondaryWindow
-
-      const addWindow = (window: any, label: string) => {
-        if (!window) return
-
-        const rawUsedPercent = window.used_percent ?? window.usedPercent
-        let usedPercent: number | null = rawUsedPercent !== null && rawUsedPercent !== undefined ? parseFloat(rawUsedPercent) : NaN
-
-        if (typeof usedPercent === 'number' && isNaN(usedPercent)) {
-          const limitReached = limitInfo.limit_reached ?? limitInfo.limitReached
-          const allowed = limitInfo.allowed
-          if (limitReached || allowed === false) {
-            usedPercent = 100
-          } else {
-            usedPercent = null
-          }
-        }
-
-        usedPercent = usedPercent !== null && !isNaN(usedPercent) ? Math.max(0, Math.min(100, usedPercent)) : null
-        const remaining = usedPercent !== null ? Math.max(0, 100 - usedPercent) : null
-
-        // 计算重置时间
-        const resetAt = window.reset_at ?? window.resetAt
-        const resetAfterSeconds = window.reset_after_seconds ?? window.resetAfterSeconds
-        let resetTime: number | null = null
-        if (resetAt) {
-          resetTime = parseFloat(resetAt)
-        } else if (resetAfterSeconds) {
-          const resetAfter = parseFloat(resetAfterSeconds)
-          if (!isNaN(resetAfter)) {
-            resetTime = Math.floor(Date.now() / 1000 + resetAfter)
-          }
-        }
-
-        limits.push({
-          model: `${prefix}${label}`,
-          percent: remaining,
-          remaining,
-          used: usedPercent !== null ? usedPercent : null,
-          total: 100,
-          resetTime: resetTime && !isNaN(resetTime) ? resetTime : undefined
-        })
-      }
-
-      addWindow(primaryWindow, 'Primary')
-      addWindow(secondaryWindow, 'Secondary')
+    const getWindowSeconds = (window: any): number | null => {
+      if (!window) return null
+      const raw = window.limit_window_seconds ?? window.limitWindowSeconds
+      const num = parseFloat(raw)
+      return Number.isFinite(num) ? num : null
     }
 
-    parseWindows(rateLimit, '')
-    parseWindows(codeReviewLimit, 'Code Review ')
+    const classifyWindows = (limitInfo: any): { fiveHour: any; weekly: any } => {
+      if (!limitInfo) return { fiveHour: null, weekly: null }
+
+      const rawWindows = [
+        limitInfo.primary_window ?? limitInfo.primaryWindow ?? null,
+        limitInfo.secondary_window ?? limitInfo.secondaryWindow ?? null
+      ]
+
+      let fiveHour: any = null
+      let weekly: any = null
+
+      for (const window of rawWindows) {
+        if (!window) continue
+        const seconds = getWindowSeconds(window)
+        if (seconds === FIVE_HOUR_SECONDS && !fiveHour) {
+          fiveHour = window
+        } else if (seconds === WEEK_SECONDS && !weekly) {
+          weekly = window
+        }
+      }
+
+      // Fallback: if classification by seconds failed, use positional order
+      if (!fiveHour && !weekly) {
+        fiveHour = rawWindows[0]
+        weekly = rawWindows[1]
+      }
+
+      return { fiveHour, weekly }
+    }
+
+    const addWindow = (window: any, label: string, limitInfo: any) => {
+      if (!window) return
+
+      const rawUsedPercent = window.used_percent ?? window.usedPercent
+      let usedPercent: number | null = rawUsedPercent !== null && rawUsedPercent !== undefined ? parseFloat(rawUsedPercent) : NaN
+
+      if (typeof usedPercent === 'number' && isNaN(usedPercent)) {
+        const limitReached = limitInfo?.limit_reached ?? limitInfo?.limitReached
+        const allowed = limitInfo?.allowed
+        if (limitReached || allowed === false) {
+          usedPercent = 100
+        } else {
+          usedPercent = null
+        }
+      }
+
+      usedPercent = usedPercent !== null && !isNaN(usedPercent) ? Math.max(0, Math.min(100, usedPercent)) : null
+      const remaining = usedPercent !== null ? Math.max(0, 100 - usedPercent) : null
+
+      const resetAt = window.reset_at ?? window.resetAt
+      const resetAfterSeconds = window.reset_after_seconds ?? window.resetAfterSeconds
+      let resetTime: number | null = null
+      if (resetAt) {
+        resetTime = parseFloat(resetAt)
+      } else if (resetAfterSeconds) {
+        const resetAfter = parseFloat(resetAfterSeconds)
+        if (!isNaN(resetAfter)) {
+          resetTime = Math.floor(Date.now() / 1000 + resetAfter)
+        }
+      }
+
+      limits.push({
+        model: label,
+        percent: remaining,
+        remaining,
+        used: usedPercent !== null ? usedPercent : null,
+        total: 100,
+        resetTime: resetTime && !isNaN(resetTime) ? resetTime : undefined
+      })
+    }
+
+    const rateWindows = classifyWindows(rateLimit)
+    addWindow(rateWindows.fiveHour, '5h', rateLimit)
+    addWindow(rateWindows.weekly, 'Weekly', rateLimit)
+
+    const crWindows = classifyWindows(codeReviewLimit)
+    addWindow(crWindows.fiveHour, 'CR 5h', codeReviewLimit)
+    addWindow(crWindows.weekly, 'CR Weekly', codeReviewLimit)
 
     return { planType, limits }
   }
