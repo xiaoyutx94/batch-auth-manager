@@ -416,6 +416,41 @@ const formatFileSize = (bytes: number) => {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
+const resolvePlanType = (file: any): string | null => {
+  const candidates = [
+    file.plan_type,
+    file.planType,
+    file.id_token?.plan_type,
+    file.id_token?.planType,
+    file.metadata?.plan_type,
+    file.metadata?.planType,
+    file.metadata?.id_token?.plan_type,
+    file.metadata?.idToken?.planType,
+    file.attributes?.plan_type,
+    file.attributes?.planType
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim().toLowerCase()
+    }
+  }
+
+  return null
+}
+
+const formatPlanTypeLabel = (planType: string) => {
+  return planType
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+const getPlanBadgeClass = (planType: string) => {
+  if (planType === 'free') return 'border-amber-400 text-amber-600 dark:text-amber-400'
+  if (planType === 'team') return 'border-sky-400 text-sky-600 dark:text-sky-400'
+  return 'border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-300'
+}
+
 const handleShowStatusDialog = (file: any) => {
   statusDialogFile.value = file
   showStatusDialog.value = true
@@ -692,7 +727,14 @@ watch(authFiles, (files) => {
                   <FileText v-else class="h-4 w-4 text-muted-foreground flex-shrink-0" />
                   <span class="font-medium text-foreground truncate">{{ file.name }}</span>
                   <Badge v-if="file.runtime_only || file.runtimeOnly" variant="secondary" class="text-[10px] px-1 py-0 h-4 flex-shrink-0">Runtime</Badge>
-                  <Badge v-if="file.id_token?.plan_type === 'free'" variant="outline" class="text-[10px] px-1 py-0 h-4 flex-shrink-0 border-amber-400 text-amber-600 dark:text-amber-400">Free</Badge>
+                  <Badge
+                    v-if="resolvePlanType(file)"
+                    variant="outline"
+                    class="text-[10px] px-1 py-0 h-4 flex-shrink-0"
+                    :class="getPlanBadgeClass(resolvePlanType(file) || '')"
+                  >
+                    {{ formatPlanTypeLabel(resolvePlanType(file) || '') }}
+                  </Badge>
                   <!-- 属性图标 -->
                   <!-- <FileAttributeIcons :file-name="file.name" :max-display="3" /> --> <!-- 暂时关闭：每个配置需要独立请求 -->
                 </div>
