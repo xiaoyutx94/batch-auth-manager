@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useNotificationStore } from '../../../stores/notification'
 import Dialog from '../dialog/Dialog.vue'
 import Button from '../Button.vue'
 
 const notificationStore = useNotificationStore()
+const confirmVisible = computed(() => notificationStore.confirm.visible)
+const confirmOptions = computed(() => notificationStore.confirm.options)
 
 const handleConfirm = () => {
   notificationStore.resolveConfirmation(true)
@@ -12,28 +15,36 @@ const handleConfirm = () => {
 const handleCancel = () => {
   notificationStore.resolveConfirmation(false)
 }
+
+onMounted(() => {
+  notificationStore.registerConfirmHost()
+})
+
+onUnmounted(() => {
+  notificationStore.unregisterConfirmHost()
+})
 </script>
 
 <template>
   <Dialog
-    :open="notificationStore.confirm.visible"
+    :open="confirmVisible"
     @update:open="(val) => !val && handleCancel()"
-    :title="notificationStore.confirm.options.title || '确认'"
+    :title="confirmOptions.title || '确认'"
   >
     <div class="py-4">
       <p class="text-sm text-foreground">
-        {{ notificationStore.confirm.options.message }}
+        {{ confirmOptions.message }}
       </p>
     </div>
     <div class="flex justify-end gap-2">
       <Button variant="outline" @click="handleCancel">
-        {{ notificationStore.confirm.options.cancelText || '取消' }}
+        {{ confirmOptions.cancelText || '取消' }}
       </Button>
       <Button
-        :variant="notificationStore.confirm.options.variant === 'danger' ? 'destructive' : 'default'"
+        :variant="confirmOptions.variant === 'danger' ? 'destructive' : 'default'"
         @click="handleConfirm"
       >
-        {{ notificationStore.confirm.options.confirmText || '确定' }}
+        {{ confirmOptions.confirmText || '确定' }}
       </Button>
     </div>
   </Dialog>

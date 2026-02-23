@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useNotificationStore } from '../../../stores/notification'
 import ToastItem from './ToastItem.vue'
 
 const notificationStore = useNotificationStore()
+const toasts = computed(() => notificationStore.toasts)
 
 const handleRemove = (id: string) => {
   notificationStore.removeToast(id)
@@ -17,7 +19,7 @@ const handleRemove = (id: string) => {
   >
     <TransitionGroup name="toast">
       <div
-        v-for="toast in notificationStore.toasts"
+        v-for="toast in toasts"
         :key="toast.id"
         class="pointer-events-auto"
       >

@@ -12,6 +12,7 @@
     "axios": "^1.6.0",
     "clsx": "^2.1.1",
     "echarts": "^6.0.0",
+    "jszip": "^3.10.1",
     "lucide-vue-next": "^0.563.0",
     "pinia": "^2.1.0",
     "tailwind-merge": "^3.4.0",

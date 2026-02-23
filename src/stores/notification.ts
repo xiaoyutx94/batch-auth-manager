@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { ref } from 'vue'
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 
@@ -23,96 +24,127 @@ interface ConfirmState {
   resolve?: (value: boolean) => void
 }
 
-interface NotificationState {
-  toasts: Toast[]
-  confirm: ConfirmState
-}
-
 let toastIdCounter = 0
 
-export const useNotificationStore = defineStore('notification', {
-  state: (): NotificationState => ({
-    toasts: [],
-    confirm: {
-      visible: false,
-      options: {
-        message: ''
-      }
+export const useNotificationStore = defineStore('notification', () => {
+  const toasts = ref<Toast[]>([])
+  const confirm = ref<ConfirmState>({
+    visible: false,
+    options: {
+      message: ''
     }
-  }),
+  })
+  const confirmHostReady = ref(false)
 
-  actions: {
-    showNotification(message: string, type: ToastType = 'info', duration: number = 3000) {
-      const id = `toast-${++toastIdCounter}-${Date.now()}`
-      const toast: Toast = {
-        id,
-        message,
-        type,
-        duration
-      }
-
-      this.toasts.push(toast)
-
-      // Auto remove after duration
-      if (duration > 0) {
-        setTimeout(() => {
-          this.removeToast(id)
-        }, duration)
-      }
-
-      return id
-    },
-
-    success(message: string, duration?: number) {
-      return this.showNotification(message, 'success', duration)
-    },
-
-    error(message: string, duration?: number) {
-      return this.showNotification(message, 'error', duration)
-    },
-
-    warning(message: string, duration?: number) {
-      return this.showNotification(message, 'warning', duration)
-    },
-
-    info(message: string, duration?: number) {
-      return this.showNotification(message, 'info', duration)
-    },
-
-    removeToast(id: string) {
-      const index = this.toasts.findIndex(t => t.id === id)
-      if (index > -1) {
-        this.toasts.splice(index, 1)
-      }
-    },
-
-    clearAll() {
-      this.toasts = []
-    },
-
-    // Confirmation dialog
-    async showConfirmation(options: ConfirmOptions): Promise<boolean> {
-      return new Promise((resolve) => {
-        this.confirm = {
-          visible: true,
-          options: {
-            title: options.title || '确认',
-            message: options.message,
-            confirmText: options.confirmText || '确定',
-            cancelText: options.cancelText || '取消',
-            variant: options.variant || 'primary'
-          },
-          resolve
-        }
-      })
-    },
-
-    resolveConfirmation(result: boolean) {
-      if (this.confirm.resolve) {
-        this.confirm.resolve(result)
-      }
-      this.confirm.visible = false
-      this.confirm.resolve = undefined
+  const showNotification = (message: string, type: ToastType = 'info', duration: number = 3000) => {
+    const id = `toast-${++toastIdCounter}-${Date.now()}`
+    const toast: Toast = {
+      id,
+      message,
+      type,
+      duration
     }
+
+    toasts.value.push(toast)
+
+    if (duration > 0) {
+      setTimeout(() => {
+        removeToast(id)
+      }, duration)
+    }
+
+    return id
+  }
+
+  const success = (message: string, duration?: number) => {
+    return showNotification(message, 'success', duration)
+  }
+
+  const error = (message: string, duration?: number) => {
+    return showNotification(message, 'error', duration)
+  }
+
+  const warning = (message: string, duration?: number) => {
+    return showNotification(message, 'warning', duration)
+  }
+
+  const info = (message: string, duration?: number) => {
+    return showNotification(message, 'info', duration)
+  }
+
+  const removeToast = (id: string) => {
+    const index = toasts.value.findIndex(t => t.id === id)
+    if (index > -1) {
+      toasts.value.splice(index, 1)
+    }
+  }
+
+  const clearAll = () => {
+    toasts.value = []
+  }
+
+  const registerConfirmHost = () => {
+    confirmHostReady.value = true
+  }
+
+  const unregisterConfirmHost = () => {
+    confirmHostReady.value = false
+    if (confirm.value.resolve) {
+      confirm.value.resolve(false)
+    }
+    confirm.value.visible = false
+    confirm.value.resolve = undefined
+  }
+
+  const showConfirmation = async (options: ConfirmOptions): Promise<boolean> => {
+    const normalizedOptions: ConfirmOptions = {
+      title: options.title || '确认',
+      message: options.message,
+      confirmText: options.confirmText || '确定',
+      cancelText: options.cancelText || '取消',
+      variant: options.variant || 'primary'
+    }
+
+    if (!confirmHostReady.value) {
+      if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+        return window.confirm(normalizedOptions.message)
+      }
+      return false
+    }
+
+    if (confirm.value.resolve) {
+      confirm.value.resolve(false)
+    }
+
+    return new Promise((resolve) => {
+      confirm.value.options = normalizedOptions
+      confirm.value.visible = true
+      confirm.value.resolve = resolve
+    })
+  }
+
+  const resolveConfirmation = (result: boolean) => {
+    if (confirm.value.resolve) {
+      confirm.value.resolve(result)
+    }
+    confirm.value.visible = false
+    confirm.value.resolve = undefined
+  }
+
+  return {
+    toasts,
+    confirm,
+    confirmHostReady,
+    showNotification,
+    success,
+    error,
+    warning,
+    info,
+    removeToast,
+    clearAll,
+    registerConfirmHost,
+    unregisterConfirmHost,
+    showConfirmation,
+    resolveConfirmation
   }
 })

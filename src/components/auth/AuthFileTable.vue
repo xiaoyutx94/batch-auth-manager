@@ -21,11 +21,12 @@ import {
   ArrowDown,
   ArrowUpDown
 } from 'lucide-vue-next'
+import JSZip from 'jszip'
 import { authFilesApi } from '../../api/authFiles'
 import { useQuotaStore, quotaKey } from '../../stores/quota'
 import { useNotificationStore } from '../../stores/notification'
 import { useAuthFiles } from '../../composables/useAuthFiles'
-import { useAuthFileFilters } from '../../composables/useAuthFileFilters'
+import { useAuthFileFilters, AUTH_FILE_SPECIAL_STATUS } from '../../composables/useAuthFileFilters'
 import { useQuotaLoader } from '../../composables/useQuotaLoader'
 import { cn } from '../../lib/utils'
 import {
@@ -65,16 +66,81 @@ const notificationStore = useNotificationStore()
 const { files: authFiles, loading, loadFiles: loadAuthFiles, setStatus: setStatusApi, batchSetStatus: batchSetStatusApi, deleteFile: deleteFileApi, batchDelete: batchDeleteApi } = useAuthFiles()
 const { loadQuota, loadExpiredQuota } = useQuotaLoader()
 
+const parseRemainingQuota = (value: unknown): number | null => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+const getCodexWeeklyRemaining = (file: any): number | null => {
+  const q = quotaStore.getQuotaStatus(quotaKey.file(file.name))
+  if (!q || q.status !== 'success') return null
+  if ((q.type || '').toLowerCase().trim() !== 'codex') return null
+
+  const limits = q.data?.limits
+  if (!Array.isArray(limits)) return null
+
+  const weekly = limits.find((l: any) => String(l?.model || '').toLowerCase().trim() === 'weekly')
+  if (!weekly) return null
+
+  return parseRemainingQuota(weekly.percent ?? weekly.remaining)
+}
+
+const isWeeklyQuotaExhausted = (file: any) => {
+  const remaining = getCodexWeeklyRemaining(file)
+  return remaining !== null && remaining <= 0
+}
+
+const hasQuotaRemaining = (file: any) => {
+  if (!supportsQuota(file.type)) return false
+
+  const codexWeeklyRemaining = getCodexWeeklyRemaining(file)
+  if (codexWeeklyRemaining !== null) {
+    return codexWeeklyRemaining > 0
+  }
+
+  const q = quotaStore.getQuotaStatus(quotaKey.file(file.name))
+  if (!q || q.status !== 'success') return false
+
+  let items: any[] = []
+  if (q.type === 'antigravity') {
+    items = (q.data?.groups || []).filter((g: any) => !g.hideInTable)
+  } else if (q.type === 'gemini-cli') {
+    items = q.data?.buckets || []
+  } else if (q.type === 'codex') {
+    items = q.data?.limits || []
+  }
+
+  return items.some((item: any) => {
+    const remainingRaw = item?.percent ?? item?.remaining
+    const remaining = parseRemainingQuota(remainingRaw)
+    return remaining !== null && remaining > 0
+  })
+}
+
 // Filters
 const {
   searchText,
   filterType,
   filterStatus,
+  filterQueryStatus,
   filterUnavailable,
   availableTypes,
   availableStatuses,
   filteredData,
-} = useAuthFileFilters(authFiles)
+} = useAuthFileFilters(authFiles, {
+  isQuotaQueryFailed: (file) => {
+    if (!supportsQuota(file.type)) return false
+    return quotaStore.getQuotaStatus(quotaKey.file(file.name))?.status === 'error'
+  },
+  isWeeklyQuotaExhausted,
+  isHasQuota: hasQuotaRemaining
+})
 
 type AuthSortKey = 'name' | 'type' | 'size' | 'status'
 
@@ -130,7 +196,7 @@ const sortedData = computed(() => {
 const { currentPage, pageSize, pageSizeOptions, totalItems, totalPages, paginatedData } = usePagination(sortedData, {
   defaultPageSize: 30,
   pageSizeOptions: [30, 50, 100, 200],
-  resetWatchers: [searchText, filterType, filterStatus, filterUnavailable, sortKey, sortOrder]
+  resetWatchers: [searchText, filterType, filterStatus, filterQueryStatus, filterUnavailable, sortKey, sortOrder]
 })
 
 const { selectedItems: selectedFiles, allSelected, isSelected, toggleSelection, toggleSelectAll, clearSelection } = useTableSelection(paginatedData)
@@ -142,10 +208,12 @@ const usageDetails = computed(() => usageStore.usageDetails)
 const batchLoading = ref(false)
 const refreshAllQuotaLoading = ref(false)
 const uploadLoading = ref(false)
+const zipImportLoading = ref(false)
 const modelsLoading = ref(false)
 const editLoading = ref(false)
 const saveLoading = ref(false)
 const toggleLoading = reactive<Record<string, boolean>>({})
+const deleteLoading = reactive<Record<string, boolean>>({})
 
 const showUploadDialog = ref(false)
 const showModelsDialog = ref(false)
@@ -158,7 +226,9 @@ const editingFile = ref<any>(null)
 const editContent = ref('')
 const quotaFile = ref<any>(null)
 const statusDialogFile = ref<any>(null)
-const uploadFile = ref<File | null>(null)
+const uploadFiles = ref<File[]>([])
+const uploadInputRef = ref<HTMLInputElement | null>(null)
+const zipInputRef = ref<HTMLInputElement | null>(null)
 
 // Computed
 const hasQuotaSupportedFiles = computed(() => {
@@ -201,7 +271,6 @@ const handleBatchAction = async (action: 'enable' | 'disable' | 'delete') => {
       await batchDeleteApi(names)
     }
     selectedFiles.value = []
-    await loadAuthFiles()
     notificationStore.success('批量操作成功')
   } catch (error: any) {
     notificationStore.error('批量操作失败: ' + error.message)
@@ -219,29 +288,211 @@ const handleRemoveSelectedFile = (name: string) => {
   selectedFiles.value = selectedFiles.value.filter((file: any) => file.name !== name)
 }
 
-const handleUploadChange = (event: Event) => {
-  const target = event.target as HTMLInputElement
-  if (target.files && target.files.length > 0) {
-    uploadFile.value = target.files[0]
+const resetUploadSelection = () => {
+  uploadFiles.value = []
+  if (uploadInputRef.value) {
+    uploadInputRef.value.value = ''
   }
 }
 
+const handleUploadDialogOpenChange = (open: boolean) => {
+  showUploadDialog.value = open
+  if (!open) {
+    resetUploadSelection()
+  }
+}
+
+const toUploadCandidates = (files: File[]) => {
+  return files.filter((file) => file.name.toLowerCase().endsWith('.json'))
+}
+
+const dedupeUploadFiles = (files: File[]) => {
+  const existing = new Set(
+    authFiles.value.map((file: any) => String(file.name || '').trim().toLowerCase())
+  )
+  const seen = new Set<string>()
+  const uniqueFiles: File[] = []
+  const skippedNames: string[] = []
+
+  for (const file of files) {
+    const key = file.name.trim().toLowerCase()
+    if (!key) continue
+    if (existing.has(key) || seen.has(key)) {
+      skippedNames.push(file.name)
+      continue
+    }
+    seen.add(key)
+    uniqueFiles.push(file)
+  }
+
+  return {
+    uniqueFiles,
+    skippedNames: Array.from(new Set(skippedNames))
+  }
+}
+
+const formatNamePreview = (names: string[], limit = 5) => {
+  if (names.length <= limit) return names.join('、')
+  return `${names.slice(0, limit).join('、')} 等 ${names.length} 个`
+}
+
+interface UploadSummary {
+  successCount: number
+  skippedCount: number
+  failedCount: number
+  totalCandidates: number
+}
+
+const uploadFilesWithDedup = async (
+  files: File[],
+  options: { silent?: boolean } = {}
+): Promise<UploadSummary> => {
+  const silent = !!options.silent
+  const candidates = toUploadCandidates(files)
+  if (candidates.length === 0) {
+    if (!silent) {
+      notificationStore.warning('没有可导入的 JSON 文件')
+    }
+    return { successCount: 0, skippedCount: 0, failedCount: 0, totalCandidates: 0 }
+  }
+
+  const { uniqueFiles, skippedNames } = dedupeUploadFiles(candidates)
+  if (uniqueFiles.length === 0) {
+    if (!silent) {
+      notificationStore.warning(`全部文件已去重跳过：${formatNamePreview(skippedNames)}`)
+    }
+    return {
+      successCount: 0,
+      skippedCount: skippedNames.length,
+      failedCount: 0,
+      totalCandidates: candidates.length
+    }
+  }
+
+  const failed: string[] = []
+  let successCount = 0
+
+  for (const file of uniqueFiles) {
+    try {
+      await authFilesApi.upload(file)
+      quotaStore.clearQuota(quotaKey.file(file.name))
+      successCount += 1
+    } catch (error: any) {
+      failed.push(`${file.name}(${error.message || '上传失败'})`)
+    }
+  }
+
+  if (successCount > 0) {
+    await loadAuthFiles()
+  }
+
+  const summary: string[] = [`成功 ${successCount}`]
+  if (skippedNames.length > 0) summary.push(`去重跳过 ${skippedNames.length}`)
+  if (failed.length > 0) summary.push(`失败 ${failed.length}`)
+
+  if (failed.length > 0) {
+    if (!silent) {
+      notificationStore.error(`导入完成：${summary.join('，')}。${formatNamePreview(failed, 3)}`)
+    }
+    return {
+      successCount,
+      skippedCount: skippedNames.length,
+      failedCount: failed.length,
+      totalCandidates: candidates.length
+    }
+  }
+
+  if (!silent) {
+    notificationStore.success(`导入完成：${summary.join('，')}`)
+  }
+  return {
+    successCount,
+    skippedCount: skippedNames.length,
+    failedCount: 0,
+    totalCandidates: candidates.length
+  }
+}
+
+const handleUploadChange = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  uploadFiles.value = target.files ? Array.from(target.files) : []
+}
+
 const handleUpload = async () => {
-  if (!uploadFile.value) {
+  if (uploadFiles.value.length === 0) {
     notificationStore.warning('请选择文件')
     return
   }
+
   uploadLoading.value = true
   try {
-    await authFilesApi.upload(uploadFile.value)
-    quotaStore.clearQuota(quotaKey.file(uploadFile.value.name))
-    showUploadDialog.value = false
-    uploadFile.value = null
-    await loadAuthFiles()
+    const result = await uploadFilesWithDedup(uploadFiles.value)
+    if (result.totalCandidates > 0 && result.failedCount === 0) {
+      handleUploadDialogOpenChange(false)
+    }
   } catch (error: any) {
     notificationStore.error('上传失败: ' + error.message)
   } finally {
     uploadLoading.value = false
+  }
+}
+
+const openZipImportPicker = () => {
+  zipInputRef.value?.click()
+}
+
+const extractJsonFilesFromZip = async (zipFile: File): Promise<File[]> => {
+  const zip = await JSZip.loadAsync(zipFile)
+  const extractedFiles: File[] = []
+
+  for (const [entryPath, entry] of Object.entries(zip.files)) {
+    if (entry.dir || !entryPath.toLowerCase().endsWith('.json')) continue
+
+    const fileName = entryPath.split('/').pop()?.trim()
+    if (!fileName) continue
+
+    const content = await entry.async('uint8array')
+    const normalizedContent = new Uint8Array(content.byteLength)
+    normalizedContent.set(content)
+    extractedFiles.push(new File([normalizedContent], fileName, { type: 'application/json' }))
+  }
+
+  return extractedFiles
+}
+
+const handleZipImportChange = async (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const zipFile = target.files?.[0]
+  target.value = ''
+  if (!zipFile) return
+
+  if (!zipFile.name.toLowerCase().endsWith('.zip')) {
+    notificationStore.warning('请选择 zip 压缩包文件')
+    return
+  }
+
+  zipImportLoading.value = true
+  try {
+    notificationStore.info(`开始导入压缩包：${zipFile.name}`)
+    const extractedFiles = await extractJsonFilesFromZip(zipFile)
+    if (extractedFiles.length === 0) {
+      notificationStore.warning('压缩包中未找到 JSON 认证文件')
+      return
+    }
+
+    const result = await uploadFilesWithDedup(extractedFiles, { silent: true })
+    const summary = `压缩包导入完成：提取 ${extractedFiles.length} 个，成功 ${result.successCount}，去重跳过 ${result.skippedCount}，失败 ${result.failedCount}`
+    if (result.failedCount > 0) {
+      notificationStore.error(summary, 6000)
+    } else if (result.successCount === 0) {
+      notificationStore.warning(summary, 5000)
+    } else {
+      notificationStore.success(summary, 5000)
+    }
+  } catch (error: any) {
+    notificationStore.error('导入压缩包失败: ' + error.message)
+  } finally {
+    zipImportLoading.value = false
   }
 }
 
@@ -298,6 +549,8 @@ const handleBatchDownload = async () => {
 }
 
 const handleDelete = async (row: any) => {
+  if (deleteLoading[row.name]) return
+
   const confirmed = await notificationStore.showConfirmation({
     title: '删除文件',
     message: `确定要删除 "${row.name}" 吗？`,
@@ -305,13 +558,15 @@ const handleDelete = async (row: any) => {
   })
   if (!confirmed) return
 
+  deleteLoading[row.name] = true
   try {
     await deleteFileApi(row.name)
     quotaStore.clearQuota(quotaKey.file(row.name))
-    await loadAuthFiles()
     notificationStore.success('删除成功')
   } catch (error: any) {
     notificationStore.error('删除失败: ' + error.message)
+  } finally {
+    delete deleteLoading[row.name]
   }
 }
 
@@ -498,6 +753,11 @@ const getCacheInfo = (file: any) => {
   }
 }
 
+const getQuotaErrorText = (file: any) => {
+  const error = quotaStore.getQuotaStatus(getQuotaKey(file))?.error
+  return error || '查询失败'
+}
+
 // 生成可用性监控点
 const getAvailabilityPoints = (file: any) => {
   const authIndex = file.auth_index ?? file.authIndex
@@ -520,37 +780,32 @@ onMounted(() => {
 
 let quotaPollTimer: ReturnType<typeof setInterval> | null = null
 
+const stopQuotaAutoRefresh = () => {
+  if (!quotaPollTimer) return
+  clearInterval(quotaPollTimer)
+  quotaPollTimer = null
+}
+
+const startQuotaAutoRefresh = (files: any[]) => {
+  if (quotaPollTimer || files.length === 0) return
+  void loadExpiredQuota(files)
+  quotaPollTimer = setInterval(() => {
+    void loadExpiredQuota(authFiles.value)
+  }, 5 * 60 * 1000)
+}
+
 onUnmounted(() => {
   usageStore.stopPolling()
-  if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer)
-  if (quotaPollTimer) clearInterval(quotaPollTimer)
+  stopQuotaAutoRefresh()
 })
 
-// Auto-refresh expired quota when files are loaded (debounced)
-let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
+// Auto-refresh quota by policy when loop starts, then poll every 5 min
 watch(authFiles, (files) => {
   if (files.length > 0) {
     quotaStore.pruneStaleEntries(files.map((f: any) => f.name))
-    if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer)
-    refreshDebounceTimer = setTimeout(() => {
-      loadExpiredQuota(files)
-    }, 500)
-
-    // Start periodic quota refresh (every 5 min)
-    if (!quotaPollTimer) {
-      quotaPollTimer = setInterval(() => {
-        loadExpiredQuota(authFiles.value)
-      }, 5 * 60 * 1000)
-    }
+    startQuotaAutoRefresh(files)
   } else {
-    if (refreshDebounceTimer) {
-      clearTimeout(refreshDebounceTimer)
-      refreshDebounceTimer = null
-    }
-    if (quotaPollTimer) {
-      clearInterval(quotaPollTimer)
-      quotaPollTimer = null
-    }
+    stopQuotaAutoRefresh()
   }
 })
 </script>
@@ -587,6 +842,15 @@ watch(authFiles, (files) => {
           </option>
         </select>
         <select
+          v-model="filterQueryStatus"
+          class="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        >
+          <option value="">配额状态</option>
+          <option :value="AUTH_FILE_SPECIAL_STATUS.quotaQueryFailed">查询失败</option>
+          <option :value="AUTH_FILE_SPECIAL_STATUS.weeklyQuotaExhausted">周限额已用完</option>
+          <option :value="AUTH_FILE_SPECIAL_STATUS.hasQuota">有配额</option>
+        </select>
+        <select
           v-model="filterUnavailable"
           class="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
@@ -602,6 +866,18 @@ watch(authFiles, (files) => {
         <Button @click="showUploadDialog = true">
           <Upload class="mr-2 h-4 w-4" />
           上传文件
+        </Button>
+        <input
+          ref="zipInputRef"
+          type="file"
+          accept=".zip,application/zip"
+          class="hidden"
+          @change="handleZipImportChange"
+        />
+        <Button variant="outline" @click="openZipImportPicker" :disabled="zipImportLoading">
+          <Loader2 v-if="zipImportLoading" class="mr-2 h-4 w-4 animate-spin" />
+          <Upload v-else class="mr-2 h-4 w-4" />
+          导入压缩包
         </Button>
         <Button variant="outline" @click="handleRefreshAllQuota" :disabled="refreshAllQuotaLoading">
           <RefreshCw :class="cn('mr-2 h-4 w-4', refreshAllQuotaLoading && 'animate-spin')" />
@@ -658,7 +934,7 @@ watch(authFiles, (files) => {
 
     <!-- Table -->
     <div class="rounded-md border bg-card">
-      <Table>
+      <Table class="table-fixed">
         <TableHeader>
           <TableRow>
             <TableHead class="w-[40px]">
@@ -748,7 +1024,7 @@ watch(authFiles, (files) => {
             <TableCell class="text-muted-foreground text-sm font-mono">
               {{ formatFileSize(file.size) }}
             </TableCell>
-            <TableCell>
+            <TableCell class="w-[80px]">
               <div class="flex flex-col items-start gap-1">
                 <Tooltip v-if="file.status_message" :content="file.status_message">
                   <div class="flex items-center gap-1">
@@ -785,8 +1061,8 @@ watch(authFiles, (files) => {
                 </Badge>
               </div>
             </TableCell>
-            <TableCell>
-               <div v-if="supportsQuota(file.type)" @click="handleViewQuota(file)" class="cursor-pointer hover:opacity-80">
+            <TableCell class="w-[240px]">
+               <div v-if="supportsQuota(file.type)" @click="handleViewQuota(file)" class="cursor-pointer hover:opacity-80 w-full max-w-full min-w-0 overflow-hidden">
                   <div v-if="quotaStore.isLoading(getQuotaKey(file)) && quotaStore.getQuotaStatus(getQuotaKey(file))?.status === 'loading'" class="flex items-center gap-1 text-xs text-muted-foreground">
                      <Loader2 class="h-3 w-3 animate-spin" /> 查询中...
                   </div>
@@ -794,7 +1070,7 @@ watch(authFiles, (files) => {
                      <div :class="getQuotaItems(file.name).length <= 3 ? 'columns-1' : getQuotaItems(file.name).length <= 6 ? 'columns-2' : 'columns-3'" class="gap-x-3 text-xs" :style="{ columnFill: 'auto', maxHeight: (Math.min(getQuotaItems(file.name).length, 3) * 1.75) + 'rem' }">
                         <div v-for="item in getQuotaItems(file.name)" :key="item.name" class="break-inside-avoid mb-1">
                            <div class="flex items-center justify-between gap-1 whitespace-nowrap">
-                              <span class="truncate text-muted-foreground" :title="item.name">{{ item.name }}</span>
+                              <span class="min-w-0 flex-1 truncate text-muted-foreground" :title="item.name">{{ item.name }}</span>
                               <span v-if="item.percent === 0 && item.resetTime" class="font-medium text-[11px] text-red-600 dark:text-red-400">{{ formatResetTime(item.resetTime) }}</span>
                               <span v-else :class="getQuotaPercentClass(item.percent ?? 0)" class="font-medium tabular-nums text-[11px]">{{ item.percent ?? '?' }}%</span>
                            </div>
@@ -805,7 +1081,7 @@ watch(authFiles, (files) => {
                      </div>
                   </div>
                   <div v-else-if="quotaStore.getQuotaStatus(getQuotaKey(file))?.status === 'error'" class="text-xs text-red-600 dark:text-red-400">
-                     查询失败
+                     <span class="block max-w-full truncate" :title="getQuotaErrorText(file)">{{ getQuotaErrorText(file) }}</span>
                   </div>
                   <div v-else class="text-xs text-muted-foreground italic">
                      点击查询
@@ -835,8 +1111,15 @@ watch(authFiles, (files) => {
                   <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="handleViewModels(file)">
                     模型
                   </Button>
-                  <Button size="sm" variant="ghost" class="h-6 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10" @click="handleDelete(file)">
-                    删除
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    class="h-6 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                    @click="handleDelete(file)"
+                    :disabled="deleteLoading[file.name]"
+                  >
+                    <Loader2 v-if="deleteLoading[file.name]" class="h-3 w-3 animate-spin" />
+                    <span v-else>删除</span>
                   </Button>
                 </div>
               </div>
@@ -910,17 +1193,33 @@ watch(authFiles, (files) => {
     </div>
 
     <!-- Upload Dialog -->
-    <Dialog :open="showUploadDialog" @update:open="showUploadDialog = $event" title="上传文件" description="上传 JSON 格式的认证文件。">
+    <Dialog
+      :open="showUploadDialog"
+      @update:open="handleUploadDialogOpenChange"
+      title="上传文件"
+      description="支持多选 JSON 文件，导入时会自动去重。"
+    >
       <div class="grid gap-4 py-4">
         <div class="grid w-full max-w-sm items-center gap-1.5">
-          <Input id="file" type="file" accept=".json" @change="handleUploadChange" />
+          <input
+            id="file"
+            ref="uploadInputRef"
+            type="file"
+            accept=".json,application/json"
+            multiple
+            class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            @change="handleUploadChange"
+          />
+          <div class="text-xs text-muted-foreground">
+            已选择 {{ uploadFiles.length }} 个文件；重复文件（同名）将自动跳过
+          </div>
         </div>
       </div>
       <div class="flex justify-end gap-2">
-        <Button variant="outline" @click="showUploadDialog = false">取消</Button>
-        <Button @click="handleUpload" :disabled="uploadLoading || !uploadFile">
+        <Button variant="outline" @click="handleUploadDialogOpenChange(false)">取消</Button>
+        <Button @click="handleUpload" :disabled="uploadLoading || uploadFiles.length === 0">
           <Loader2 v-if="uploadLoading" class="mr-2 h-4 w-4 animate-spin" />
-          上传
+          {{ uploadFiles.length > 1 ? `上传 ${uploadFiles.length} 个文件` : '上传' }}
         </Button>
       </div>
     </Dialog>

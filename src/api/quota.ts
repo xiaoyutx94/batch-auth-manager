@@ -52,6 +52,69 @@ function parseBody(body: any): any {
   }
 }
 
+function normalizeText(value: any): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
+function stringifyIfNeeded(value: any): string | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') return normalizeText(value)
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+
+  try {
+    return normalizeText(JSON.stringify(value))
+  } catch {
+    return null
+  }
+}
+
+function resolveStatusCode(result: ApiCallResponse): number | null {
+  if (Number.isFinite(result.statusCode) && result.statusCode > 0) {
+    return result.statusCode
+  }
+
+  const bodyStatus = result.body?.status
+  const parsedStatus = typeof bodyStatus === 'number' ? bodyStatus : parseFloat(bodyStatus)
+  return Number.isFinite(parsedStatus) && parsedStatus > 0 ? parsedStatus : null
+}
+
+function getOriginalErrorText(result: ApiCallResponse): string | null {
+  const bodyText = stringifyIfNeeded(result.bodyText)
+  if (bodyText) return bodyText
+  return stringifyIfNeeded(result.body)
+}
+
+function formatNon2xxError(result: ApiCallResponse): string {
+  const statusCode = resolveStatusCode(result)
+  const errorObj = result.body && typeof result.body === 'object' && result.body.error && typeof result.body.error === 'object'
+    ? result.body.error
+    : null
+
+  // 仅当响应符合预期结构（error.code/error.message）时才重组提示文案
+  if (errorObj) {
+    const errorCode = normalizeText(errorObj.code)
+    const message = normalizeText(errorObj.message)
+    const prefix = statusCode ? `HTTP ${statusCode}` : 'HTTP error'
+
+    if (errorCode && message) return `${prefix} ${errorCode}: ${message}`
+    if (errorCode) return `${prefix} ${errorCode}`
+    if (message) return `${prefix}: ${message}`
+  }
+
+  return getOriginalErrorText(result) || (statusCode ? `HTTP ${statusCode}` : 'HTTP error')
+}
+
+function createNon2xxError(result: ApiCallResponse): Error & { statusCode?: number } {
+  const statusCode = resolveStatusCode(result)
+  const error = new Error(formatNon2xxError(result)) as Error & { statusCode?: number }
+  if (statusCode) {
+    error.statusCode = statusCode
+  }
+  return error
+}
+
 /**
  * Helper: download and parse auth file JSON
  */
@@ -236,7 +299,7 @@ export const antigravityQuota = {
     const projectId = await resolveAntigravityProjectId(file.name)
     const requestBody = JSON.stringify({ project: projectId })
 
-    let lastError = null
+    let lastError: Error | null = null
 
     for (const url of this.URLS) {
       try {
@@ -252,13 +315,17 @@ export const antigravityQuota = {
           return this.parse(result.body)
         }
 
-        lastError = result.bodyText || `HTTP ${result.statusCode}`
+        if (result.statusCode < 200 || result.statusCode >= 300) {
+          lastError = createNon2xxError(result)
+        } else {
+          lastError = new Error(result.bodyText || `HTTP ${result.statusCode}`)
+        }
       } catch (error: any) {
-        lastError = error.message
+        lastError = error instanceof Error ? error : new Error(String(error))
       }
     }
 
-    throw new Error(lastError || 'Failed to fetch Antigravity quota')
+    throw lastError || new Error('Failed to fetch Antigravity quota')
   },
 
   parse(data: any): any {
@@ -416,7 +483,7 @@ export const geminiCliQuota = {
     })
 
     if (result.statusCode < 200 || result.statusCode >= 300) {
-      throw new Error(result.bodyText || `HTTP ${result.statusCode}`)
+      throw createNon2xxError(result)
     }
 
     return this.parse(result.body)
@@ -504,7 +571,7 @@ export const codexQuota = {
     })
 
     if (result.statusCode < 200 || result.statusCode >= 300) {
-      throw new Error(result.bodyText || `HTTP ${result.statusCode}`)
+      throw createNon2xxError(result)
     }
 
     return this.parse(result.body, planTypeFromFile)

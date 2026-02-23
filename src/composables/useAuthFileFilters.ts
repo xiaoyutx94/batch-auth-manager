@@ -1,6 +1,18 @@
 import { computed, ref, Ref } from 'vue'
 import type { AuthFile } from '../api/authFiles'
 
+export const AUTH_FILE_SPECIAL_STATUS = {
+  quotaQueryFailed: '__quota_query_failed__',
+  weeklyQuotaExhausted: '__weekly_quota_exhausted__',
+  hasQuota: '__has_quota__'
+} as const
+
+interface UseAuthFileFiltersOptions {
+  isQuotaQueryFailed?: (file: AuthFile) => boolean
+  isWeeklyQuotaExhausted?: (file: AuthFile) => boolean
+  isHasQuota?: (file: AuthFile) => boolean
+}
+
 /**
  * 从数据中动态提取唯一值
  */
@@ -25,11 +37,12 @@ function extractUniqueValues<T>(
 /**
  * 认证文件筛选 Hook
  */
-export function useAuthFileFilters(files: Ref<AuthFile[]>) {
+export function useAuthFileFilters(files: Ref<AuthFile[]>, options: UseAuthFileFiltersOptions = {}) {
   // 筛选状态
   const searchText = ref('')
   const filterType = ref('')
   const filterStatus = ref('')
+  const filterQueryStatus = ref('')
   const filterUnavailable = ref('')
 
   // 动态提取可用的类型（从实际数据中获取）
@@ -72,6 +85,17 @@ export function useAuthFileFilters(files: Ref<AuthFile[]>) {
       })
     }
 
+    // 查询状态筛选
+    if (filterQueryStatus.value) {
+      if (filterQueryStatus.value === AUTH_FILE_SPECIAL_STATUS.quotaQueryFailed) {
+        data = data.filter((file: AuthFile) => options.isQuotaQueryFailed?.(file) ?? false)
+      } else if (filterQueryStatus.value === AUTH_FILE_SPECIAL_STATUS.weeklyQuotaExhausted) {
+        data = data.filter((file: AuthFile) => options.isWeeklyQuotaExhausted?.(file) ?? false)
+      } else if (filterQueryStatus.value === AUTH_FILE_SPECIAL_STATUS.hasQuota) {
+        data = data.filter((file: AuthFile) => options.isHasQuota?.(file) ?? false)
+      }
+    }
+
     // 可用性筛选
     if (filterUnavailable.value) {
       if (filterUnavailable.value === 'true') {
@@ -89,6 +113,7 @@ export function useAuthFileFilters(files: Ref<AuthFile[]>) {
     searchText.value = ''
     filterType.value = ''
     filterStatus.value = ''
+    filterQueryStatus.value = ''
     filterUnavailable.value = ''
   }
 
@@ -98,6 +123,7 @@ export function useAuthFileFilters(files: Ref<AuthFile[]>) {
       searchText.value ||
       filterType.value ||
       filterStatus.value ||
+      filterQueryStatus.value ||
       filterUnavailable.value
     )
   })
@@ -107,6 +133,7 @@ export function useAuthFileFilters(files: Ref<AuthFile[]>) {
     searchText,
     filterType,
     filterStatus,
+    filterQueryStatus,
     filterUnavailable,
 
     // 动态选项
