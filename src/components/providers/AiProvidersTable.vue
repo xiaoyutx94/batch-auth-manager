@@ -11,6 +11,7 @@ import {
   ChevronsRight,
   Plus,
   Edit,
+  Copy,
   X,
   ArrowUp,
   ArrowDown,
@@ -69,8 +70,52 @@ const deleting = ref<string | null>(null)
 // Dialog states
 const showAddDialog = ref(false)
 const showEditDialog = ref(false)
+const showCopyDialog = ref(false)
 const editingProvider = ref<any>(null)
 const editingProviderKey = ref<string | null>(null)
+const copyingProvider = ref<any>(null)
+const copying = ref(false)
+const copyForm = ref({
+  targetType: 'gemini' as ProviderType
+})
+
+type ProviderField = 'apiKey' | 'name' | 'prefix' | 'baseUrl' | 'proxyUrl' | 'priority' | 'headers' | 'excludedModels'
+
+const PROVIDER_TYPES: ProviderType[] = ['gemini', 'claude', 'codex', 'vertex', 'openai']
+
+const PROVIDER_FIELD_LABELS: Record<ProviderField, string> = {
+  apiKey: 'API Key',
+  name: '名称',
+  prefix: '前缀',
+  baseUrl: 'Base URL',
+  proxyUrl: 'Proxy URL',
+  priority: '优先级',
+  headers: '自定义 Headers',
+  excludedModels: '排除模型'
+}
+
+const PROVIDER_FIELD_PROFILE: Record<ProviderType, { required: ProviderField[]; optional: ProviderField[] }> = {
+  gemini: {
+    required: ['apiKey'],
+    optional: ['name', 'prefix', 'baseUrl', 'proxyUrl', 'priority', 'headers', 'excludedModels']
+  },
+  claude: {
+    required: ['apiKey'],
+    optional: ['name', 'prefix', 'baseUrl', 'proxyUrl', 'priority', 'headers', 'excludedModels']
+  },
+  codex: {
+    required: ['apiKey'],
+    optional: ['name', 'prefix', 'baseUrl', 'proxyUrl', 'priority', 'headers', 'excludedModels']
+  },
+  vertex: {
+    required: ['apiKey'],
+    optional: ['name', 'prefix', 'baseUrl', 'proxyUrl', 'priority', 'headers']
+  },
+  openai: {
+    required: ['name'],
+    optional: ['apiKey', 'prefix', 'baseUrl', 'proxyUrl', 'priority', 'headers']
+  }
+}
 
 // Add form
 const addForm = ref({
@@ -318,6 +363,220 @@ const parseFormConfig = (form: typeof editForm.value) => {
     priority: priorityValue,
     headers: Object.keys(headers).length > 0 ? headers : undefined,
     excludedModels: excludedModels.length > 0 ? excludedModels : undefined
+  }
+}
+
+const getDefaultCopyTargetType = (sourceType: ProviderType): ProviderType => {
+  return PROVIDER_TYPES.find(type => type !== sourceType) || sourceType
+}
+
+const getTypeFieldSet = (type: ProviderType) => {
+  const profile = PROVIDER_FIELD_PROFILE[type]
+  return new Set<ProviderField>([...profile.required, ...profile.optional])
+}
+
+const normalizeProviderSnapshot = (provider: any): Record<ProviderField, any> => {
+  const rawPriority = Number(provider?.priority)
+  const normalizedHeaders = provider?.headers && typeof provider.headers === 'object' && !Array.isArray(provider.headers)
+    ? Object.fromEntries(
+      Object.entries(provider.headers)
+        .map(([key, value]) => [String(key).trim(), String(value).trim()])
+        .filter(([key, value]) => !!key && !!value)
+    )
+    : undefined
+
+  return {
+    apiKey: String(provider?.apiKey || '').trim(),
+    name: String(provider?.name || '').trim(),
+    prefix: String(provider?.prefix || '').trim(),
+    baseUrl: String(provider?.baseUrl || '').trim(),
+    proxyUrl: String(provider?.proxyUrl || '').trim(),
+    priority: Number.isFinite(rawPriority) ? rawPriority : undefined,
+    headers: normalizedHeaders,
+    excludedModels: Array.isArray(provider?.excludedModels)
+      ? provider.excludedModels.map((item: any) => String(item).trim()).filter(Boolean)
+      : undefined
+  }
+}
+
+const hasFieldValue = (field: ProviderField, value: any) => {
+  if (field === 'priority') return typeof value === 'number' && Number.isFinite(value)
+  if (field === 'headers') return !!value && typeof value === 'object' && Object.keys(value).length > 0
+  if (field === 'excludedModels') return Array.isArray(value) && value.length > 0
+  return typeof value === 'string' ? value.trim().length > 0 : value !== undefined && value !== null
+}
+
+const buildDefaultCopyName = (provider: any) => {
+  const sourceName = String(provider?.name || '').trim()
+  if (sourceName) return `${sourceName}-copy`
+
+  const sourceTypeLabel = getProviderDisplayName(String(provider?.type || 'provider'))
+  const apiKeySuffix = String(provider?.apiKey || '').trim().slice(-6)
+  return apiKeySuffix ? `${sourceTypeLabel}-${apiKeySuffix}` : `${sourceTypeLabel}-copy`
+}
+
+const ensureUniqueName = (baseName: string, existingNames: string[]) => {
+  const used = new Set(existingNames.map(name => String(name || '').trim()).filter(Boolean))
+  if (!used.has(baseName)) return baseName
+
+  let index = 2
+  let candidate = `${baseName}-${index}`
+  while (used.has(candidate)) {
+    index += 1
+    candidate = `${baseName}-${index}`
+  }
+  return candidate
+}
+
+const buildCopyConfigForTarget = (provider: any, targetType: ProviderType) => {
+  const source = normalizeProviderSnapshot(provider)
+  const targetFields = getTypeFieldSet(targetType)
+  const config: Record<string, any> = {}
+
+  targetFields.forEach(field => {
+    const value = source[field]
+    if (!hasFieldValue(field, value)) return
+    if (field === 'headers') {
+      config.headers = { ...value }
+      return
+    }
+    if (field === 'excludedModels') {
+      config.excludedModels = [...value]
+      return
+    }
+    config[field] = value
+  })
+
+  if (targetType === 'openai') {
+    if (!hasFieldValue('name', config.name)) {
+      config.name = buildDefaultCopyName(provider)
+    }
+  } else if (!hasFieldValue('apiKey', config.apiKey)) {
+    throw new Error('目标类型需要 API Key，当前配置缺少 API Key')
+  }
+
+  return config
+}
+
+const copyFieldDiff = computed(() => {
+  if (!copyingProvider.value) {
+    return {
+      sourceOnlyFields: [] as ProviderField[],
+      sourceOnlyWithValue: [] as ProviderField[],
+      targetOnlyFields: [] as ProviderField[],
+      autoGeneratedFields: [] as ProviderField[],
+      blockingReasons: [] as string[],
+      hasDiff: false
+    }
+  }
+
+  const sourceType = copyingProvider.value.type as ProviderType
+  const targetType = copyForm.value.targetType
+  const sourceFields = getTypeFieldSet(sourceType)
+  const targetFields = getTypeFieldSet(targetType)
+  const sourceSnapshot = normalizeProviderSnapshot(copyingProvider.value)
+
+  const sourceOnlyFields = Array.from(sourceFields).filter(field => !targetFields.has(field))
+  const sourceOnlyWithValue = sourceOnlyFields.filter(field => hasFieldValue(field, sourceSnapshot[field]))
+  const targetOnlyFields = Array.from(targetFields).filter(field => !sourceFields.has(field))
+
+  const autoGeneratedFields: ProviderField[] = []
+  const blockingReasons: string[] = []
+
+  PROVIDER_FIELD_PROFILE[targetType].required.forEach(field => {
+    if (hasFieldValue(field, sourceSnapshot[field])) return
+    if (targetType === 'openai' && field === 'name') {
+      autoGeneratedFields.push(field)
+      return
+    }
+    blockingReasons.push(`目标类型要求 ${PROVIDER_FIELD_LABELS[field]}，但当前配置中不存在。`)
+  })
+
+  return {
+    sourceOnlyFields,
+    sourceOnlyWithValue,
+    targetOnlyFields,
+    autoGeneratedFields,
+    blockingReasons,
+    hasDiff: sourceType !== targetType && (
+      sourceOnlyFields.length > 0 ||
+      targetOnlyFields.length > 0 ||
+      autoGeneratedFields.length > 0 ||
+      blockingReasons.length > 0
+    )
+  }
+})
+
+const copyPreviewConfig = computed(() => {
+  if (!copyingProvider.value) return null
+  try {
+    return buildCopyConfigForTarget(copyingProvider.value, copyForm.value.targetType)
+  } catch {
+    return null
+  }
+})
+
+const resetCopyDialogState = () => {
+  copyingProvider.value = null
+  copyForm.value.targetType = 'gemini'
+  copying.value = false
+}
+
+const closeCopyDialog = () => {
+  showCopyDialog.value = false
+  resetCopyDialogState()
+}
+
+const handleCopyDialogOpenChange = (open: boolean) => {
+  showCopyDialog.value = open
+  if (!open) resetCopyDialogState()
+}
+
+const handleCopy = (provider: any) => {
+  const sourceType = provider.type as ProviderType
+  copyingProvider.value = provider
+  copyForm.value.targetType = getDefaultCopyTargetType(sourceType)
+  showCopyDialog.value = true
+}
+
+const handleSaveCopy = async () => {
+  if (!copyingProvider.value) return
+  if (copyFieldDiff.value.blockingReasons.length > 0) {
+    notificationStore.warning(copyFieldDiff.value.blockingReasons[0])
+    return
+  }
+
+  copying.value = true
+  try {
+    const targetType = copyForm.value.targetType
+    const config = buildCopyConfigForTarget(copyingProvider.value, targetType)
+    const configs = await providersApi.getProviders(targetType)
+
+    if (targetType === 'openai') {
+      const baseName = String(config.name || buildDefaultCopyName(copyingProvider.value)).trim() || 'OpenAI Provider'
+      const existingNames = configs.map(item => item.name || '')
+      config.name = ensureUniqueName(baseName, existingNames)
+    } else {
+      const apiKey = String(config.apiKey || '').trim()
+      if (!apiKey) {
+        notificationStore.warning('目标类型需要 API Key，当前配置无法复制')
+        return
+      }
+      if (configs.some(item => String(item.apiKey || '').trim() === apiKey)) {
+        notificationStore.warning('目标类型中已存在相同 API Key，无法复制')
+        return
+      }
+    }
+
+    configs.push(config as any)
+    await configStore.saveProviders(targetType, configs)
+    closeCopyDialog()
+    await loadAll()
+    notificationStore.success(`已复制为 ${getProviderDisplayName(targetType)} 配置`)
+  } catch (error: any) {
+    notificationStore.error('复制失败: ' + (error?.message || '未知错误'))
+  } finally {
+    copying.value = false
   }
 }
 
@@ -575,7 +834,7 @@ onUnmounted(() => {
               </button>
             </TableHead>
             <TableHead class="w-[280px]">可用性监控</TableHead>
-            <TableHead class="w-[150px]">操作</TableHead>
+            <TableHead class="w-[220px]">操作</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -645,6 +904,10 @@ onUnmounted(() => {
                 </Button>
                 <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="handleEdit(provider)">
                   <Edit class="h-3 w-3" />
+                </Button>
+                <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="handleCopy(provider)">
+                  <Copy class="mr-1 h-3 w-3" />
+                  复制
                 </Button>
                 <Button
                   size="sm" variant="ghost"
@@ -824,6 +1087,86 @@ onUnmounted(() => {
       <div class="flex justify-end gap-2">
         <Button variant="outline" @click="showEditDialog = false">取消</Button>
         <Button @click="handleSaveEdit">保存</Button>
+      </div>
+    </Dialog>
+
+    <!-- Copy Provider Dialog -->
+    <Dialog :open="showCopyDialog" @update:open="handleCopyDialogOpenChange" title="复制提供商配置">
+      <div class="grid gap-4 py-4" v-if="copyingProvider">
+        <div class="rounded-md border bg-muted/40 p-3 text-sm">
+          <div class="font-medium">源配置</div>
+          <div class="mt-1 text-muted-foreground">
+            {{ getProviderDisplayName(copyingProvider.type) }} / {{ copyingProvider.displayName }}
+          </div>
+        </div>
+
+        <div class="grid gap-2">
+          <Label>目标类型</Label>
+          <select
+            v-model="copyForm.targetType"
+            class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <option v-for="type in PROVIDER_TYPES" :key="type" :value="type">
+              {{ getProviderDisplayName(type) }}
+            </option>
+          </select>
+        </div>
+
+        <div class="grid gap-2">
+          <Label>字段差异</Label>
+          <div class="rounded-md border p-3 text-sm space-y-3">
+            <p v-if="!copyFieldDiff.hasDiff" class="text-muted-foreground">源类型与目标类型字段结构一致，可直接复制。</p>
+
+            <div v-if="copyFieldDiff.sourceOnlyFields.length > 0" class="space-y-1">
+              <p class="text-xs font-medium text-amber-700 dark:text-amber-300">目标类型不支持的字段</p>
+              <div class="flex flex-wrap gap-1.5">
+                <Badge
+                  v-for="field in copyFieldDiff.sourceOnlyFields"
+                  :key="`source-only-${field}`"
+                  variant="outline"
+                  :class="copyFieldDiff.sourceOnlyWithValue.includes(field) ? 'border-amber-500 text-amber-700 dark:text-amber-300' : ''"
+                >
+                  {{ PROVIDER_FIELD_LABELS[field] }}
+                  <span v-if="copyFieldDiff.sourceOnlyWithValue.includes(field)" class="ml-1">将忽略</span>
+                </Badge>
+              </div>
+            </div>
+
+            <div v-if="copyFieldDiff.targetOnlyFields.length > 0" class="space-y-1">
+              <p class="text-xs font-medium text-sky-700 dark:text-sky-300">目标类型新增字段</p>
+              <div class="flex flex-wrap gap-1.5">
+                <Badge v-for="field in copyFieldDiff.targetOnlyFields" :key="`target-only-${field}`" variant="outline">
+                  {{ PROVIDER_FIELD_LABELS[field] }}
+                </Badge>
+              </div>
+            </div>
+
+            <div v-if="copyFieldDiff.autoGeneratedFields.length > 0" class="space-y-1">
+              <p class="text-xs font-medium text-emerald-700 dark:text-emerald-300">将自动生成字段</p>
+              <div class="flex flex-wrap gap-1.5">
+                <Badge v-for="field in copyFieldDiff.autoGeneratedFields" :key="`auto-${field}`" variant="outline" class="border-emerald-500 text-emerald-700 dark:text-emerald-300">
+                  {{ PROVIDER_FIELD_LABELS[field] }}
+                </Badge>
+              </div>
+            </div>
+
+            <div v-if="copyFieldDiff.blockingReasons.length > 0" class="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+              <p v-for="reason in copyFieldDiff.blockingReasons" :key="reason">{{ reason }}</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid gap-2">
+          <Label>生成预览</Label>
+          <pre class="max-h-44 overflow-auto rounded-md border bg-muted/30 p-3 text-xs leading-5">{{ copyPreviewConfig ? JSON.stringify(copyPreviewConfig, null, 2) : '当前配置无法生成目标类型配置' }}</pre>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <Button variant="outline" @click="closeCopyDialog">取消</Button>
+        <Button @click="handleSaveCopy" :disabled="copying || copyFieldDiff.blockingReasons.length > 0">
+          {{ copying ? '复制中...' : '确定' }}
+        </Button>
       </div>
     </Dialog>
   </div>

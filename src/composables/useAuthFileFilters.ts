@@ -4,12 +4,14 @@ import type { AuthFile } from '../api/authFiles'
 export const AUTH_FILE_SPECIAL_STATUS = {
   quotaQueryFailed: '__quota_query_failed__',
   weeklyQuotaExhausted: '__weekly_quota_exhausted__',
+  quotaNotQueried: '__quota_not_queried__',
   hasQuota: '__has_quota__'
 } as const
 
 interface UseAuthFileFiltersOptions {
   isQuotaQueryFailed?: (file: AuthFile) => boolean
   isWeeklyQuotaExhausted?: (file: AuthFile) => boolean
+  isQuotaNotQueried?: (file: AuthFile) => boolean
   isHasQuota?: (file: AuthFile) => boolean
 }
 
@@ -91,6 +93,8 @@ export function useAuthFileFilters(files: Ref<AuthFile[]>, options: UseAuthFileF
         data = data.filter((file: AuthFile) => options.isQuotaQueryFailed?.(file) ?? false)
       } else if (filterQueryStatus.value === AUTH_FILE_SPECIAL_STATUS.weeklyQuotaExhausted) {
         data = data.filter((file: AuthFile) => options.isWeeklyQuotaExhausted?.(file) ?? false)
+      } else if (filterQueryStatus.value === AUTH_FILE_SPECIAL_STATUS.quotaNotQueried) {
+        data = data.filter((file: AuthFile) => options.isQuotaNotQueried?.(file) ?? false)
       } else if (filterQueryStatus.value === AUTH_FILE_SPECIAL_STATUS.hasQuota) {
         data = data.filter((file: AuthFile) => options.isHasQuota?.(file) ?? false)
       }

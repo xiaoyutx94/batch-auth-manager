@@ -139,6 +139,11 @@ const {
     return quotaStore.getQuotaStatus(quotaKey.file(file.name))?.status === 'error'
   },
   isWeeklyQuotaExhausted,
+  isQuotaNotQueried: (file) => {
+    if (!supportsQuota(file.type)) return false
+    const status = quotaStore.getQuotaStatus(quotaKey.file(file.name))?.status
+    return !status || status === 'idle'
+  },
   isHasQuota: hasQuotaRemaining
 })
 
@@ -848,6 +853,7 @@ watch(authFiles, (files) => {
           <option value="">配额状态</option>
           <option :value="AUTH_FILE_SPECIAL_STATUS.quotaQueryFailed">查询失败</option>
           <option :value="AUTH_FILE_SPECIAL_STATUS.weeklyQuotaExhausted">周限额已用完</option>
+          <option :value="AUTH_FILE_SPECIAL_STATUS.quotaNotQueried">未查询</option>
           <option :value="AUTH_FILE_SPECIAL_STATUS.hasQuota">有配额</option>
         </select>
         <select

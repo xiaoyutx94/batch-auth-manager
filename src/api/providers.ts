@@ -31,11 +31,26 @@ const PROVIDER_ENDPOINTS: Record<ProviderType, ProviderEndpoint> = {
   openai:  { path: '/v0/management/openai-compatibility', responseKey: 'openai-compatibility', deleteParam: 'name' },
 }
 
+function extractOpenAiEntryApiKey(item: any): string {
+  const entries = item?.['api-key-entries'] ?? item?.apiKeyEntries
+  if (!Array.isArray(entries)) return ''
+
+  for (const entry of entries) {
+    const key = entry?.['api-key'] ?? entry?.apiKey
+    const trimmed = String(key || '').trim()
+    if (trimmed) return trimmed
+  }
+
+  return ''
+}
+
 function normalizeProviderConfig(item: any, type?: ProviderType): ProviderConfig | null {
   if (!item) return null
 
-  const apiKey = item['api-key'] ?? item.apiKey ?? (typeof item === 'string' ? item : '')
-  const trimmed = String(apiKey || '').trim()
+  const directApiKey = item['api-key'] ?? item.apiKey ?? (typeof item === 'string' ? item : '')
+  const directTrimmed = String(directApiKey || '').trim()
+  const openAiEntryApiKey = type === 'openai' && !directTrimmed ? extractOpenAiEntryApiKey(item) : ''
+  const trimmed = directTrimmed || openAiEntryApiKey
   const hasApiKey = !!trimmed
   const nameValue = item?.name ? String(item.name).trim() : ''
   const hasName = !!nameValue
